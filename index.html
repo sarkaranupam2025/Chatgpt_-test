@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Perfect Drop</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: linear-gradient(to top, #101834 0%, #1f2a60 45%, #0f0924 100%);
+      overflow: hidden;
+      touch-action: manipulation;
+      user-select: none;
+    }
+    #ui {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      color: #f5f8ff;
+    }
+    #score { margin-top: 18px; font-size: 40px; font-weight: 800; letter-spacing: 1px; }
+    #best { margin-top: 2px; font-size: 15px; opacity: 0.85; }
+    #message {
+      margin-top: 14px;
+      min-height: 24px;
+      font-weight: 700;
+      color: #ffe18e;
+      text-shadow: 0 0 16px rgba(255,255,160,.7);
+      transition: transform .12s ease;
+    }
+    #overlay {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      pointer-events: none;
+    }
+    #card {
+      background: rgba(6, 12, 25, 0.7);
+      border: 1px solid rgba(150, 170, 255, .3);
+      border-radius: 16px;
+      padding: 20px 24px;
+      text-align: center;
+      color: #fff;
+      max-width: min(90vw, 360px);
+      backdrop-filter: blur(8px);
+      opacity: 0;
+      transform: translateY(14px);
+      transition: .18s ease;
+    }
+    #card.show { opacity: 1; transform: translateY(0); }
+    #card h1 { margin: 0 0 8px; font-size: 24px; }
+    #card p { margin: 4px 0; opacity: .92; }
+    #hint { margin-top: 12px; color: #99f0ff; font-weight: 600; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <div id="ui">
+    <div id="score">0</div>
+    <div id="best">Best: 0</div>
+    <div id="message"></div>
+  </div>
+
+  <div id="overlay">
+    <div id="card" class="show">
+      <h1>Perfect Drop</h1>
+      <p>Tap anywhere to drop the block.</p>
+      <p>Stack as high as you can.</p>
+      <p id="hint">Tap to Start</p>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const bestEl = document.getElementById('best');
+    const msgEl = document.getElementById('message');
+    const card = document.getElementById('card');
+
+    const state = {
+      running: false,
+      gameOver: false,
+      score: 0,
+      best: Number(localStorage.getItem('perfect-drop-best') || 0),
+      streak: 0,
+      comboGlow: false,
+      stack: [],
+      active: null,
+      speed: 2,
+      camY: 0,
+      shake: 0,
+      messageTimer: 0,
+      particles: [],
+    };
+
+    const W = () => canvas.width;
+    const H = () => canvas.height;
+    const BLOCK_H = 34;
+    const BASE_WIDTH = 230;
+    const PERFECT_MARGIN_RATIO = 0.05;
+
+    function resize() {
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      canvas.width = Math.floor(innerWidth * dpr);
+      canvas.height = Math.floor(innerHeight * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function resetGame() {
+      state.running = true;
+      state.gameOver = false;
+      state.score = 0;
+      state.streak = 0;
+      state.comboGlow = false;
+      state.speed = 2;
+      state.camY = 0;
+      state.stack = [];
+      state.particles = [];
+      state.messageTimer = 0;
+      card.classList.remove('show');
+
+      const base = {
+        x: innerWidth / 2 - BASE_WIDTH / 2,
+        y: innerHeight - 130,
+        w: BASE_WIDTH,
+        h: BLOCK_H,
+        color: '#7ec8ff'
+      };
+      state.stack.push(base);
+      spawnActive();
+      updateUI();
+      vibrate(20);
+    }
+
+    function spawnActive() {
+      const top = state.stack[state.stack.length - 1];
+      const dir = Math.random() > 0.5 ? 1 : -1;
+      state.active = {
+        w: top.w,
+        h: BLOCK_H,
+        y: top.y - BLOCK_H,
+        x: dir > 0 ? -top.w : innerWidth,
+        vx: state.speed * dir,
+        dropping: false,
+        color: randomColor()
+      };
+    }
+
+    function randomColor() {
+      const palette = ['#6ed0ff', '#9f8bff', '#73f6ce', '#ffd56e', '#ff8eb3'];
+      return palette[(Math.random() * palette.length) | 0];
+    }
+
+    function drop() {
+      if (!state.running || state.gameOver || !state.active) return;
+      const top = state.stack[state.stack.length - 1];
+      const a = state.active;
+      const overlap = Math.min(a.x + a.w, top.x + top.w) - Math.max(a.x, top.x);
+
+      if (overlap <= 0) return fail();
+
+      const miss = Math.abs(a.x - top.x);
+      const perfectMargin = top.w * PERFECT_MARGIN_RATIO;
+      const nearPerfect = miss <= perfectMargin;
+      const ultra = nearPerfect && Math.random() < 0.15;
+
+      if (nearPerfect) {
+        a.x = top.x;
+        a.w = top.w;
+        state.streak += 1;
+        state.score += ultra ? 7 : 2;
+        flashMessage(ultra ? 'ULTRA PERFECT +7' : 'PERFECT +2');
+        state.shake = ultra ? 12 : 7;
+        spawnParticles(a.x + a.w / 2, a.y + a.h / 2, ultra ? 30 : 18, ultra ? '#ffe67b' : '#c4f4ff');
+        vibrate(ultra ? [20, 40, 20] : 14);
+      } else {
+        const cutLeft = a.x < top.x;
+        if (cutLeft) a.x = top.x;
+        a.w = overlap;
+        state.streak = 0;
+        state.score += 1;
+        flashMessage('+1');
+        spawnParticles(a.x + a.w / 2, a.y + a.h / 2, 10, '#ffffffaa');
+      }
+
+      state.comboGlow = state.streak >= 5;
+      state.stack.push({ ...a });
+      if (state.stack.length % 5 === 0) state.speed += 0.25;
+      spawnActive();
+      updateUI();
+    }
+
+    function fail() {
+      state.gameOver = true;
+      state.running = false;
+      flashMessage('MISS');
+      state.shake = 16;
+      vibrate(40);
+      if (state.score > state.best) {
+        state.best = state.score;
+        localStorage.setItem('perfect-drop-best', state.best);
+      }
+      updateUI();
+      setTimeout(() => {
+        card.querySelector('h1').textContent = 'Game Over';
+        card.querySelector('p').textContent = `Score: ${state.score}`;
+        card.querySelectorAll('p')[1].textContent = `Best: ${state.best}`;
+        document.getElementById('hint').textContent = 'Tap to Restart';
+        card.classList.add('show');
+      }, 180);
+    }
+
+    function updateUI() {
+      scoreEl.textContent = state.score;
+      bestEl.textContent = `Best: ${state.best}`;
+    }
+
+    function flashMessage(text) {
+      msgEl.textContent = text;
+      state.messageTimer = 0.7;
+      msgEl.style.transform = 'scale(1.08)';
+      setTimeout(() => (msgEl.style.transform = 'scale(1)'), 100);
+    }
+
+    function spawnParticles(x, y, count, color) {
+      for (let i = 0; i < count; i++) {
+        state.particles.push({
+          x, y,
+          vx: (Math.random() - 0.5) * 5,
+          vy: (Math.random() - 0.5) * 5 - 1,
+          life: 0.6 + Math.random() * 0.5,
+          color
+        });
+      }
+    }
+
+    function vibrate(pattern) {
+      if (navigator.vibrate) navigator.vibrate(pattern);
+    }
+
+    function update(dt) {
+      if (state.active && state.running) {
+        state.active.x += state.active.vx * dt * 160;
+        if (state.active.x <= -state.active.w) state.active.x = innerWidth;
+        if (state.active.x >= innerWidth) state.active.x = -state.active.w;
+      }
+
+      const top = state.stack[state.stack.length - 1];
+      if (top) {
+        const targetCam = Math.max(0, (innerHeight - 180) - top.y);
+        state.camY += (targetCam - state.camY) * Math.min(1, dt * 4);
+      }
+
+      if (state.shake > 0) state.shake = Math.max(0, state.shake - dt * 35);
+      if (state.messageTimer > 0) {
+        state.messageTimer -= dt;
+        if (state.messageTimer <= 0) msgEl.textContent = '';
+      }
+
+      state.particles = state.particles.filter(p => {
+        p.life -= dt;
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.05;
+        return p.life > 0;
+      });
+    }
+
+    function draw() {
+      const sx = state.shake > 0 ? (Math.random() - 0.5) * state.shake : 0;
+      const sy = state.shake > 0 ? (Math.random() - 0.5) * state.shake : 0;
+
+      ctx.clearRect(0, 0, innerWidth, innerHeight);
+      ctx.save();
+      ctx.translate(sx, sy + state.camY);
+
+      for (const b of state.stack) {
+        drawBlock(b.x, b.y, b.w, b.h, b.color);
+      }
+      if (state.active) {
+        drawBlock(state.active.x, state.active.y, state.active.w, state.active.h, state.comboGlow ? '#fff9a1' : state.active.color, state.comboGlow);
+      }
+
+      for (const p of state.particles) {
+        ctx.globalAlpha = Math.max(0, p.life);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x, p.y, 3, 3);
+      }
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    }
+
+    function drawBlock(x, y, w, h, color, glow = false) {
+      if (glow) {
+        ctx.shadowColor = '#fff3a7';
+        ctx.shadowBlur = 20;
+      }
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y, w, h);
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+      ctx.strokeRect(x + .5, y + .5, w - 1, h - 1);
+    }
+
+    let last = performance.now();
+    function tick(now) {
+      const dt = Math.min(0.034, (now - last) / 1000);
+      last = now;
+      update(dt);
+      draw();
+      requestAnimationFrame(tick);
+    }
+
+    function handleTap() {
+      if (!state.running || state.gameOver) {
+        card.querySelector('h1').textContent = 'Perfect Drop';
+        card.querySelector('p').textContent = 'Tap anywhere to drop the block.';
+        card.querySelectorAll('p')[1].textContent = 'Stack as high as you can.';
+        resetGame();
+      } else {
+        drop();
+      }
+    }
+
+    window.addEventListener('pointerdown', handleTap);
+    window.addEventListener('resize', resize);
+
+    resize();
+    updateUI();
+    requestAnimationFrame(tick);
+  </script>
+</body>
+</html>
